@@ -28,6 +28,16 @@ android {
         }
     }
 
+    // Force extraction of native libs into nativeLibraryDir so the app can
+    // execve the probe binary (same as DFRoot). Without this, AGP stores the
+    // .so unextracted, nativeLibraryDir stays empty, and execve fails with
+    // "error=2, No such file or directory".
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
