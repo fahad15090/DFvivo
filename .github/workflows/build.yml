@@ -21,7 +21,7 @@ jobs:
       - name: Pre-install NDK + CMake + platform
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "ndk;26.1.10909165" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
 
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v6
