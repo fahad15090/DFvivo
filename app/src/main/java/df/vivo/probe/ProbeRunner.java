@@ -20,8 +20,19 @@ import java.util.List;
 public class ProbeRunner {
 
     private static final String NATIVE_BIN = "libdfprobe.so";
+    private static final String HOOK_LIB   = "/system/lib64/libc++.so";
+    private static final String HOOK_SYM   =
+            "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_";
 
     public interface Reporter { void report(String s); }
+
+    private static final class IpSecCtx {
+        IpSecManager.UdpEncapsulationSocket encapSock;
+        IpSecManager.SecurityParameterIndex spiObj;
+        IpSecTransform transform;
+        byte[] aesKey;
+        int senderPort;
+    }
 
     public static synchronized void run(Context ctx, Reporter reporter) throws Exception {
         reportDeviceInfo(reporter);
@@ -38,44 +49,14 @@ public class ProbeRunner {
             fo.getFD().sync();
         }
 
-        // ---- IpSec setup (identical to DFRoot) ----------------------------
-        IpSecManager ipsec =
-                (IpSecManager) ctx.getSystemService(Context.IPSEC_SERVICE);
-        if (ipsec == null) {
-            reporter.report("RESULT: ENV-FAIL IpSecManager unavailable\n");
-            return;
-        }
-
-        IpSecManager.UdpEncapsulationSocket encapSock = ipsec.openUdpEncapsulationSocket();
-        InetAddress loopback = InetAddress.getByName("127.0.0.1");
-        IpSecManager.SecurityParameterIndex spiObj = ipsec.allocateSecurityParameterIndex(loopback);
-
-        byte[] aesKey = new byte[32];
-        new SecureRandom().nextBytes(aesKey);
-
-        DatagramSocket senderSock = new DatagramSocket();
-        int senderPort = senderSock.getLocalPort();
-        senderSock.close();
-
-        IpSecTransform transform = new IpSecTransform.Builder(ctx)
-                .setEncryption(new IpSecAlgorithm(IpSecAlgorithm.CRYPT_AES_CBC, aesKey))
-                .setIpv4Encapsulation(encapSock, senderPort)
-                .buildTransportModeTransform(loopback, spiObj);
-
-        reporter.report("");
-        reporter.report("ipsec: transform built (SA inactive, encap port "
-                + encapSock.getPort() + ", spi 0x"
-                + Integer.toHexString(spiObj.getSpi()) + ")\n");
-
+        IpSecCtx ip = openIpSec(ctx, reporter);
         try {
             runBinary(new File(ctx.getApplicationInfo().nativeLibraryDir, NATIVE_BIN),
                     reporter,
-                    encapSock.getPort(), spiObj.getSpi(), aesKey, senderPort,
+                    ip,
                     probeFile.getAbsolutePath());
         } finally {
-            transform.close();
-            spiObj.close();
-            encapSock.close();
+            closeIpSec(ip);
         }
 
         // probe file removed so the next run starts from the clean pattern
@@ -83,6 +64,67 @@ public class ProbeRunner {
         try { //noinspection ResultOfMethodCallIgnored
             probeFile.delete();
         } catch (Exception ignored) {}
+    }
+
+    /** Stage-2 hook flow: mode = status | patch | unpatch | trigger | full. */
+    public static synchronized void runHook(Context ctx, Reporter reporter, String mode)
+            throws Exception {
+        reporter.report("\n=== STAGE2 hook mode=" + mode + " ===\n");
+        reportDeviceInfo(reporter);
+
+        File stateFile = new File(ctx.getFilesDir(), "dfstate.bin");
+
+        IpSecCtx ip = openIpSec(ctx, reporter);
+        try {
+            runBinary(new File(ctx.getApplicationInfo().nativeLibraryDir, NATIVE_BIN),
+                    reporter,
+                    ip,
+                    /* probeFile */ null,
+                    "--hook-mode", mode,
+                    "--hook-lib", HOOK_LIB,
+                    "--hook-sym", HOOK_SYM,
+                    "--hook-state", stateFile.getAbsolutePath(),
+                    "--marker", "/dev/dfd");
+        } finally {
+            closeIpSec(ip);
+        }
+    }
+
+    private static IpSecCtx openIpSec(Context ctx, Reporter reporter) throws Exception {
+        IpSecCtx ip = new IpSecCtx();
+        IpSecManager ipsec =
+                (IpSecManager) ctx.getSystemService(Context.IPSEC_SERVICE);
+        if (ipsec == null) {
+            reporter.report("RESULT: ENV-FAIL IpSecManager unavailable\n");
+            throw new IllegalStateException("IpSecManager unavailable");
+        }
+
+        ip.encapSock = ipsec.openUdpEncapsulationSocket();
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        ip.spiObj = ipsec.allocateSecurityParameterIndex(loopback);
+
+        ip.aesKey = new byte[32];
+        new SecureRandom().nextBytes(ip.aesKey);
+
+        DatagramSocket senderSock = new DatagramSocket();
+        ip.senderPort = senderSock.getLocalPort();
+        senderSock.close();
+
+        ip.transform = new IpSecTransform.Builder(ctx)
+                .setEncryption(new IpSecAlgorithm(IpSecAlgorithm.CRYPT_AES_CBC, ip.aesKey))
+                .setIpv4Encapsulation(ip.encapSock, ip.senderPort)
+                .buildTransportModeTransform(loopback, ip.spiObj);
+
+        reporter.report("ipsec: transform built (SA inactive, encap port "
+                + ip.encapSock.getPort() + ", spi 0x"
+                + Integer.toHexString(ip.spiObj.getSpi()) + ")\n");
+        return ip;
+    }
+
+    private static void closeIpSec(IpSecCtx ip) {
+        try { if (ip.transform != null)  ip.transform.close(); }  catch (Exception ignored) {}
+        try { if (ip.spiObj != null)     ip.spiObj.close(); }     catch (Exception ignored) {}
+        try { if (ip.encapSock != null)  ip.encapSock.close(); }  catch (Exception ignored) {}
     }
 
     private static void reportDeviceInfo(Reporter reporter) {
@@ -113,16 +155,16 @@ public class ProbeRunner {
         }
     }
 
-    private static void runBinary(File bin, Reporter reporter,
-                                  int encapPort, int spi, byte[] aesKey,
-                                  int senderPort, String probeFile) throws Exception {
+    private static void runBinary(File bin, Reporter reporter, IpSecCtx ip,
+                                  String probeFile, String... extra) throws Exception {
         List<String> cmd = new ArrayList<>();
         cmd.add(bin.getAbsolutePath());
-        cmd.add("--encap-port");  cmd.add(String.valueOf(encapPort));
-        cmd.add("--sender-port"); cmd.add(String.valueOf(senderPort));
-        cmd.add("--spi");         cmd.add(Integer.toUnsignedString(spi));
-        cmd.add("--aes-key");     cmd.add(hex(aesKey));
-        cmd.add("--file");        cmd.add(probeFile);
+        cmd.add("--encap-port");  cmd.add(String.valueOf(ip.encapSock.getPort()));
+        cmd.add("--sender-port"); cmd.add(String.valueOf(ip.senderPort));
+        cmd.add("--spi");         cmd.add(Integer.toUnsignedString(ip.spiObj.getSpi()));
+        cmd.add("--aes-key");     cmd.add(hex(ip.aesKey));
+        if (probeFile != null) { cmd.add("--file"); cmd.add(probeFile); }
+        for (String a : extra) cmd.add(a);
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);

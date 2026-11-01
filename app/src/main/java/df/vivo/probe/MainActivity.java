@@ -13,6 +13,8 @@ public class MainActivity extends Activity {
 
     private TextView log;
     private Button run;
+    private Button hook;
+    private Button unpatch;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -23,10 +25,22 @@ public class MainActivity extends Activity {
         root.setPadding(24, 24, 24, 24);
 
         run = new Button(this);
-        run.setText("Run DFProbe");
+        run.setText("Run DFProbe (stage 1)");
         root.addView(run, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         run.setOnClickListener(v -> startProbe());
+
+        hook = new Button(this);
+        hook.setText("Hook libc++ + Fire (stage 2 full)");
+        root.addView(hook, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        hook.setOnClickListener(v -> startHook("full"));
+
+        unpatch = new Button(this);
+        unpatch.setText("Unpatch libc++ (restore)");
+        root.addView(unpatch, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        unpatch.setOnClickListener(v -> startHook("unpatch"));
 
         ScrollView sc = new ScrollView(this);
         log = new TextView(this);
@@ -40,9 +54,10 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        append("DFProbe 0.1 — appender of CVE-2026-43284 (DirtyFrag ESP page-cache write)\n");
-        append("Runs the write primitive against THIS APP'S OWN private file only.\n");
-        append("Nothing system-wide is patched. Press Run.\n\n");
+        append("DFvivo 0.2 — CVE-2026-43284 (DirtyFrag) root probe\n");
+        append("Stage 1: write primitive vs app's own file.\n");
+        append("Stage 2 full: hook libc++ ostream::sentry, orphan-trigger init,\n");
+        append("marker check at /dev/dfd, stays patched until \"Unpatch libc++\".\n\n");
     }
 
     private void append(final String s) {
@@ -54,6 +69,8 @@ public class MainActivity extends Activity {
 
     private void startProbe() {
         run.setEnabled(false);
+        hook.setEnabled(false);
+        unpatch.setEnabled(false);
         append("\n=== RUN " + new java.util.Date() + " ===\n");
         new Thread(() -> {
             try {
@@ -63,7 +80,25 @@ public class MainActivity extends Activity {
                 t.printStackTrace(new java.io.PrintWriter(sw));
                 append("FATAL: " + sw + "\n");
             } finally {
-                runOnUiThread(() -> run.setEnabled(true));
+                runOnUiThread(() -> { run.setEnabled(true); hook.setEnabled(true); unpatch.setEnabled(true); });
+            }
+        }).start();
+    }
+
+    private void startHook(final String mode) {
+        run.setEnabled(false);
+        hook.setEnabled(false);
+        unpatch.setEnabled(false);
+        append("\n=== HOOK(" + mode + ") " + new java.util.Date() + " ===\n");
+        new Thread(() -> {
+            try {
+                ProbeRunner.runHook(this, this::append, mode);
+            } catch (Throwable t) {
+                java.io.StringWriter sw = new java.io.StringWriter();
+                t.printStackTrace(new java.io.PrintWriter(sw));
+                append("FATAL: " + sw + "\n");
+            } finally {
+                runOnUiThread(() -> { run.setEnabled(true); hook.setEnabled(true); unpatch.setEnabled(true); });
             }
         }).start();
     }
