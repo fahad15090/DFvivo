@@ -16,6 +16,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Pre-install exactly what AGP 8.5.2 will ask for (avoids the flaky
+      # on-the-fly auto-download of the NDK inside the build).
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
       - name: Pre-install NDK + CMake + platform
@@ -23,6 +25,7 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0" > /dev/null
 
+      # The repo has no wrapper, so provide a pinned Gradle.
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v6
         with:
@@ -33,5 +36,5 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: DFVivo-apk
+          name: DFProbe-apk
           path: app/build/outputs/apk/debug/app-debug.apk
