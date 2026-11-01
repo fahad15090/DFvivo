@@ -83,8 +83,7 @@ public class ProbeRunner {
                     "--hook-mode", mode,
                     "--hook-lib", HOOK_LIB,
                     "--hook-sym", HOOK_SYM,
-                    "--hook-state", stateFile.getAbsolutePath(),
-                    "--marker", "/dev/dfd");
+                    "--hook-state", stateFile.getAbsolutePath());
         } finally {
             closeIpSec(ip);
         }

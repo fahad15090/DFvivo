@@ -229,6 +229,7 @@ int main(int argc, char **argv) {
                 g_aes_key[j] = (uint8_t)b;
             }
         } else if (strstr(argv[i], "--hook-") == argv[i] && i + 1 < argc) { i++; }
+        else if (!strcmp(argv[i], "--marker") && i + 1 < argc) { i++; }
         else { printf("usage: %s [--encap-port N --sender-port N --spi N --aes-key HEX] [--file P] [--hook-mode M ...]\n", argv[0]); return 2; }
     }
     g_spi = (uint32_t)spi;
